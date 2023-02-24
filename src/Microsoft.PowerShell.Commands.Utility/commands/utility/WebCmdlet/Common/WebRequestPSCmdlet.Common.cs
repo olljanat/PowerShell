@@ -11,6 +11,7 @@ using System.Management.Automation;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Net.Sockets;
 using System.Security;
 using System.Security.Authentication;
 using System.Security.Cryptography;
@@ -306,6 +307,17 @@ namespace Microsoft.PowerShell.Commands
         public virtual SwitchParameter NoProxy { get; set; }
 
         #endregion
+
+        #region UnixSocket
+
+        /// <summary>
+        /// Gets or sets the UnixSocket property.
+        /// </summary>
+        [Parameter]
+        [ValidateNotNullOrEmpty]
+        public virtual UnixDomainSocketEndPoint UnixSocket { get; set; }
+
+        #endregion UnixSocket
 
         #region Proxy
 
@@ -993,14 +1005,26 @@ namespace Microsoft.PowerShell.Commands
         internal virtual HttpClient GetHttpClient(bool handleRedirect)
         {
             // By default the HttpClientHandler will automatically decompress GZip and Deflate content
-            HttpClientHandler handler = new();
+            SocketsHttpHandler handler = new();
+
+            if (UnixSocket is not null)
+            {
+                handler.ConnectCallback = async (context, token) =>
+                {
+                    Socket socket = new(AddressFamily.Unix, SocketType.Stream, ProtocolType.IP);
+                    UnixDomainSocketEndPoint endpoint = UnixSocket;
+                    await socket.ConnectAsync(endpoint).ConfigureAwait(false);
+
+                    return new NetworkStream(socket, ownsSocket: false);
+                };
+            }
             handler.CookieContainer = WebSession.Cookies;
 
             // set the credentials used by this request
             if (WebSession.UseDefaultCredentials)
             {
                 // the UseDefaultCredentials flag overrides other supplied credentials
-                handler.UseDefaultCredentials = true;
+                handler.Credentials = CredentialCache.DefaultCredentials;
             }
             else if (WebSession.Credentials != null)
             {
@@ -1018,13 +1042,12 @@ namespace Microsoft.PowerShell.Commands
 
             if (WebSession.Certificates != null)
             {
-                handler.ClientCertificates.AddRange(WebSession.Certificates);
+                handler.SslOptions.ClientCertificates = new X509CertificateCollection(WebSession.Certificates);
             }
 
             if (SkipCertificateCheck)
             {
-                handler.ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator;
-                handler.ClientCertificateOptions = ClientCertificateOption.Manual;
+                handler.SslOptions.RemoteCertificateValidationCallback = delegate { return true; };
             }
 
             // This indicates GetResponse will handle redirects.
@@ -1044,7 +1067,7 @@ namespace Microsoft.PowerShell.Commands
                 }
             }
 
-            handler.SslProtocols = (SslProtocols)SslProtocol;
+            handler.SslOptions.EnabledSslProtocols = (SslProtocols)SslProtocol;
 
             HttpClient httpClient = new(handler);
 
